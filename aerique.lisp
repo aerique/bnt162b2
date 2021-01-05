@@ -92,13 +92,13 @@
 
 ;;; Functions
 
-(defun print-strand-for-rnafold (codons)
+(defun codons-to-nucleotides (codons)
   (loop for codon across codons
         append (list (elt codon 1) (elt codon 1) (elt codon 2)) into result
         finally (return (coerce result 'string))))
 
 
-(defun compare-against-vaccine (codons parsed-side-by-side)
+(defun compare-codons-against-vaccine (codons parsed-side-by-side)
   "CODONS should be a vector of codons where each codon is a three letter
   string: #(\"TAA\" \"ACA\" ...)
   Returns the percentage of codons EQUAL to the codons in the vaccine."
@@ -111,10 +111,32 @@
                                   100.0)))))
 
 
-(defun get-original-codons (parsed-side-by-side)
+(defun compare-nucleotides-against-vaccine (codons parsed-side-by-side)
+  "CODONS should be a vector of codons where each codon is a three letter
+  string: #(\"TAA\" \"ACA\" ...)
+  Returns the percentage of nucelotides EQUAL to the ones in the vaccine."
+  (loop with vaccine-nucleotides = (codons-to-nucleotides
+                                    (get-vaccine-codons parsed-side-by-side))
+        with n_different = 0
+        for nucleotide across (codons-to-nucleotides codons)
+        for i from 0
+        do (when (char/= nucleotide (elt vaccine-nucleotides i))
+             (incf n_different))
+        finally (return (- 100 (* (/ n_different (length vaccine-nucleotides))
+                                  100.0)))))
+
+
+(defun get-virus-codons (parsed-side-by-side)
   "PARSED-SIDE-BY-SIDE is the output of READ-SIDE-BY-SIDE-CSV."
   (loop for row across parsed-side-by-side
         collect (elt row 1) into result
+        finally (return (coerce result 'vector))))
+
+
+(defun get-vaccine-codons (parsed-side-by-side)
+  "PARSED-SIDE-BY-SIDE is the output of READ-SIDE-BY-SIDE-CSV."
+  (loop for row across parsed-side-by-side
+        collect (elt row 2) into result
         finally (return (coerce result 'vector))))
 
 
@@ -122,13 +144,13 @@
 
 (defun nop (parsed-side-by-side &key verbose)
   (declare (ignore verbose))
-  (get-original-codons parsed-side-by-side))
+  (get-virus-codons parsed-side-by-side))
 
 
 ;;; Bert's Sample Algorithm: ../00-Resources/bnt162b2-git/3rd-gc.go
 
 (defun berts-algorithm (parsed-side-by-side &key (verbose t))
-  (let ((codons (get-original-codons parsed-side-by-side))
+  (let ((codons (get-virus-codons parsed-side-by-side))
         (equiv (read-codon-table-csv)))
     (loop for codon across codons
           for i from 0
@@ -169,7 +191,7 @@
 ;;
 ;; Result: 62.72%
 (defun replace-with-higher-gc-codon-01 (parsed-side-by-side &key (verbose t))
-  (let* ((codons (get-original-codons parsed-side-by-side))
+  (let* ((codons (get-virus-codons parsed-side-by-side))
          (tables (make-equivalence-tables))
          (c2a (getf tables :c2a))   ; codon to aminoacid
          (a2c (getf tables :a2c)))  ; aminoacid to codons
@@ -200,7 +222,7 @@
 ;; Same as `replace-with-higher-gc-codon-01` but uses last codon with highest
 ;; G and/or C count for the aminoacid.  Quite a difference!
 (defun replace-with-higher-gc-codon-02 (parsed-side-by-side &key (verbose t))
-  (let* ((codons (get-original-codons parsed-side-by-side))
+  (let* ((codons (get-virus-codons parsed-side-by-side))
          (tables (make-equivalence-tables))
          (c2a (getf tables :c2a))   ; codon to aminoacid
          (a2c (getf tables :a2c)))  ; aminoacid to codons
@@ -228,17 +250,33 @@
     codons))
 
 
+(defun replace-cca-with-cct (parsed-side-by-side &key (verbose t))
+  (let ((codons (get-virus-codons parsed-side-by-side)))
+    (loop for codon across codons
+          for i from 0
+          do (when (string= codon "CCA")
+               (when verbose
+                 (format t "~4D: replacing CCA -> CCT~%" i))
+               (setf (elt codons i) "CCT")))
+    codons))
+
+
 ;;; Main
 
 (defun main ()
-  (format t "~&~%=== results ===~%")
+  (format t "~&~%=== results ===~%~%")
   (let ((psbs (read-side-by-side-csv))
         (algorithms '(nop
                       berts-algorithm
                       replace-with-higher-gc-codon-01
-                      replace-with-higher-gc-codon-02)))
+                      replace-with-higher-gc-codon-02
+                      replace-cca-with-cct)))
+    (format t " name                             | codon match | nucleotide match~%~
+               ----------------------------------+-------------+------------------~%")
     (loop for algo in algorithms
-          for perc = (compare-against-vaccine (funcall algo psbs :verbose nil)
-                                              psbs)
-          do (format t "~32A: ~,2F%~%" algo perc)))
-  (format t "===~%~%You can quit the Lisp environment with `(quit)`.~%"))
+          for codons = (funcall algo psbs :verbose nil)
+          for codon_perc = (compare-codons-against-vaccine codons psbs)
+          for nucl_perc = (compare-nucleotides-against-vaccine codons psbs)
+          do (format t " ~32A |      ~2,2F% | ~2,2F%~%"
+                     algo codon_perc nucl_perc)))
+  (format t "~%===~%~%You can quit the Lisp environment with `(quit)`.~%"))
