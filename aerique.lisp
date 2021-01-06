@@ -302,16 +302,19 @@
         finally (return (coerce result 'vector))))
 
 
-(defun ga-static-remap (parsed-side-by-side &key (generations 10000)
+(defun ga-static-remap (parsed-side-by-side &key (codon-mapping nil)
+                                                 (generations 10000)
                                                  (verbose t))
-  (let* ((mapping (make-random-codon-mapping))
+  (let* ((mapping (if codon-mapping
+                      (copy-codon-mapping codon-mapping)
+                      (make-random-codon-mapping)))
          (tables (make-equivalence-tables))
          (a2c (getf tables :a2c))
          (c2a (getf tables :c2a))
          (virus-codons (get-virus-codons parsed-side-by-side)))
-    (when verbose
-      (format t "mapping: ")
-      (print-codon-mapping mapping))
+    ;(when verbose
+    ;  (format t "mapping: ")
+    ;  (print-codon-mapping mapping))
     (loop with best-mapping          = nil
           with best-codon-match      = 0
           with best-nucleotide-match = 0
@@ -335,8 +338,8 @@
                      best-codon-match      new-codon-match
                      best-nucleotide-match new-nucleotide-match)
                (when verbose
-                 (format t "[~8D] improved generation: codon-match=~2,2F% ~
-                                  nucleotide-match=~2,2F%~%"
+                 (format t "  - [~8D] improved generation: codon-match=~2,2F% ~
+                            nucleotide-match=~2,2F%~%"
                          i best-codon-match best-nucleotide-match)
                  (force-output)))
              ;; Change a random mapping.
@@ -349,10 +352,50 @@
                     (new-codon (random-elt (gethash (gethash random-key c2a)
                                                     a2c))))
                ;(when verbose
-               ;  (format t "[~8D] replacing ~A -> ~A~%"
+               ;  (format t "  - [~8D] replacing ~A -> ~A~%"
                ;          i (gethash random-key mapping) new-codon)
                ;  (force-output))
                (setf (gethash random-key mapping) new-codon))
+          finally (return best-mapping))))
+
+
+;; Experience so far is that in the initial 10000 to 100000 generations the
+;; most optimizations are found and then the GA run gets stuck in a local
+;; optimum.  So we do multiple shorter runs and see how that goes.  Then we
+;; can spend more time on the best result.
+(defun multiple-ga-runs (parsed-side-by-side &key (generations 1000)
+                                                  (runs 100) (verbose t))
+  (let ((virus-codons (get-virus-codons parsed-side-by-side)))
+    (when verbose
+      (format t "=== doing ~D GA runs ===~%" runs)
+      (force-output))
+    (loop with best-mapping          = nil
+          with best-codon-match      = 0
+          with best-nucleotide-match = 0
+          repeat runs
+          for i from 0
+          for new-mapping          = (ga-static-remap parsed-side-by-side
+                                                      :generations generations
+                                                      :verbose nil)
+          for new-codons           = (do-remap virus-codons new-mapping)
+          for new-codon-match      = (compare-codons-against-vaccine
+                                      new-codons parsed-side-by-side)
+          for new-nucleotide-match = (compare-nucleotides-against-vaccine
+                                      new-codons parsed-side-by-side)
+          do ;(when verbose
+             ;  (format t "--- run ~D ---~%" i))
+             ;; See `ga-static-remap`.
+             (when (or (> new-codon-match best-codon-match)
+                       (and (= new-codon-match      best-codon-match)
+                            (> new-nucleotide-match best-nucleotide-match)))
+               (setf best-mapping          (copy-codon-mapping new-mapping)
+                     best-codon-match      new-codon-match
+                     best-nucleotide-match new-nucleotide-match)
+               (when verbose
+                 (format t "o [~6D] improved mapping: codon-match=~2,2F% ~
+                            nucleotide-match=~2,2F%~%"
+                         i best-codon-match best-nucleotide-match)
+                 (force-output)))
           finally (return best-mapping))))
 
 
