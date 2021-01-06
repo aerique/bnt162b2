@@ -34,6 +34,10 @@
            hash-table))
 
 
+(defun random-elt (sequence)
+  (elt sequence (random (length sequence))))
+
+
 ;;; CSV Functions
 
 (defun print-side-by-side (parsed-side-by-side)
@@ -259,6 +263,97 @@
                  (format t "~4D: replacing CCA -> CCT~%" i))
                (setf (elt codons i) "CCT")))
     codons))
+
+
+;;; GA Static Remap Attempt
+
+(defun make-random-codon-mapping ()
+  (let* ((mapping (make-hash-table :size 64 :test #'equal))
+         (tables (make-equivalence-tables))
+         (c2a (getf tables :c2a))   ; codon to aminoacid
+         (a2c (getf tables :a2c)))  ; aminoacid to codons
+    (loop for codon in (loop for codon being the hash-keys in c2a
+                             collect codon)
+          for aminoacid = (gethash codon c2a)
+          for codons = (gethash aminoacid a2c)
+          do (setf (gethash codon mapping) (random-elt codons)))
+    mapping))  ; hash table (faster than an alist (hopefully (pretty sure)))
+
+
+(defun copy-codon-mapping (codon-mapping)
+  (let ((copy (make-hash-table :size 64 :test #'equal)))
+    (maphash (lambda (k v)
+               (setf (gethash k copy) v))
+             codon-mapping)
+    copy))
+
+
+(defun print-codon-mapping (codon-mapping)
+  "CODON-MAPPING is the output of MAKE-RANDOM-CODON-MAPPING (a hash table)."
+  (maphash (lambda (k v)
+             (format t "[~A->~A] " k v))
+           codon-mapping)
+      (format t "~%"))
+
+
+(defun do-remap (virus-codons codon-mapping)
+  (loop for codon across virus-codons
+        collect (gethash codon codon-mapping) into result
+        finally (return (coerce result 'vector))))
+
+
+(defun ga-static-remap (parsed-side-by-side &key (generations 10000)
+                                                 (verbose t))
+  (let* ((mapping (make-random-codon-mapping))
+         (tables (make-equivalence-tables))
+         (a2c (getf tables :a2c))
+         (c2a (getf tables :c2a))
+         (virus-codons (get-virus-codons parsed-side-by-side)))
+    (when verbose
+      (format t "mapping: ")
+      (print-codon-mapping mapping))
+    (loop with best-mapping          = nil
+          with best-codon-match      = 0
+          with best-nucleotide-match = 0
+          repeat generations
+          for i from 0
+          for new-codons           = (do-remap virus-codons mapping)
+          for new-codon-match      = (compare-codons-against-vaccine
+                                      new-codons parsed-side-by-side)
+          for new-nucleotide-match = (compare-nucleotides-against-vaccine
+                                      new-codons parsed-side-by-side)
+          do ;; Note: If the matches are exactly the same the new codons are
+             ;;       skipped, this might ignore codons that provide a better
+             ;;       folding match!
+             ;;
+             ;; A codon match is preferred over a nucleotide match.  This is
+             ;; an arbitrary choice.
+             (when (or (> new-codon-match best-codon-match)
+                       (and (= new-codon-match      best-codon-match)
+                            (> new-nucleotide-match best-nucleotide-match)))
+               (setf best-mapping          (copy-codon-mapping mapping)
+                     best-codon-match      new-codon-match
+                     best-nucleotide-match new-nucleotide-match)
+               (when verbose
+                 (format t "[~8D] improved generation: codon-match=~2,2F% ~
+                                  nucleotide-match=~2,2F%~%"
+                         i best-codon-match best-nucleotide-match)
+                 (force-output)))
+             ;; Change a random mapping.
+             (let* ((keys (loop for k being the hash-keys in mapping
+                                collect k))
+                    (random-key (random-elt keys))
+                    ;; We use one of the mapping codons (`random-key`) to get
+                    ;; its aminoacid and use that aminoacid the get the
+                    ;; equivalent codons and pick a random one of those.
+                    (new-codon (random-elt (gethash (gethash random-key c2a)
+                                                    a2c))))
+               ;(when verbose
+               ;  (format t "[~8D] replacing ~A -> ~A~%"
+               ;          i (gethash random-key mapping) new-codon)
+               ;  (force-output))
+               (setf (gethash random-key mapping) new-codon))
+          finally (return best-mapping))))
 
 
 ;;; Main
