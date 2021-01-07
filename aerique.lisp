@@ -422,19 +422,30 @@
         finally (return (coerce result 'vector))))
 
 
+;(defun determine-population-fitness (population parsed-side-by-side)
+;  (loop with psbs = parsed-side-by-side
+;        with virus-codons = (get-virus-codons parsed-side-by-side)
+;        for individual across population
+;        for codons = (do-remap virus-codons individual)
+;        for codon-match = (compare-codons-against-vaccine codons psbs)
+;        for nucleotide-match = (compare-nucleotides-against-vaccine codons psbs)
+;        for fitness = (+ (* 2 codon-match) nucleotide-match)
+;        collect (cons fitness individual) into result
+;        finally (return (sort (coerce result 'vector) #'> :key #'car))))
+
+;; Just optimizing for codon match now.
 (defun determine-population-fitness (population parsed-side-by-side)
   (loop with psbs = parsed-side-by-side
         with virus-codons = (get-virus-codons parsed-side-by-side)
         for individual across population
         for codons = (do-remap virus-codons individual)
         for codon-match = (compare-codons-against-vaccine codons psbs)
-        for nucleotide-match = (compare-nucleotides-against-vaccine codons psbs)
-        for fitness = (+ (* 2 codon-match) nucleotide-match)
+        for fitness = codon-match
         collect (cons fitness individual) into result
         finally (return (sort (coerce result 'vector) #'> :key #'car))))
 
 
-(defun tournament-selection (fitness-population &key (rounds 4))
+(defun tournament-selection (fitness-population &key (rounds 3))
   "FITNESS-POPULATION is the output of DETERMINE-POPULATION-FITNESS."
   (loop with best = (random-elt fitness-population)
         repeat rounds
@@ -491,28 +502,31 @@
 
 (defun evolve (population parse-side-by-side)
   (loop with size = (length population)
-        with f-p = (determine-population-fitness population parse-side-by-side)
+        with pf = (determine-population-fitness population parse-side-by-side)
         with new-population = ;; elitisism: fill part of new population with
-                              ;; the best member of the previous population
-                              (loop for i across (subseq f-p 0 (floor size 10))
-                                    collect (cdr i))
+                              ;; the best members of the previous population
+                              (loop for i across (subseq pf 0 (floor size 1000))
+                                    collect (cdr i))            ; default 10
         while (< (length new-population) (length population))
-        do (if (<= (random 1.0) 0.8)
+        do (if (<= (random 1.0) 0.8)  ; default 0.8
                ;; crossover
-               (loop for child in (mate (tournament-selection f-p)
-                                        (tournament-selection f-p))
-                     do (if (<= (random 1.0) 0.03)
+               (loop for child in (mate (tournament-selection pf)
+                                        (tournament-selection pf))
+                     do (if (<= (random 1.0) 0.2)  ; default 0.03
                             (push (mutate child) new-population)
                             (push child new-population)))
                ;; no crossover, no mating
-               (if (<= (random 1.0) 0.03)
+               (if (<= (random 1.0) 0.2)           ; default 0.03
                    (push (mutate (random-elt population)) new-population)
                    (push (random-elt population) new-population)))
         finally (return (coerce new-population 'vector))))
 
 
+;; To profile: `(sb-sprof:with-profiling (:sample-interval 0.0001
+;;                                        :report :flat)
+;;                (do-runs psbs :max-generations 8 :population-size 1024))`
 (defun do-runs (parsed-side-by-side
-                &key (max-generations 10) (population-size 16))
+                &key (max-generations 32) (population-size 2048))
   (let* ((p  (make-population :size population-size))
          (pf (determine-population-fitness p parsed-side-by-side)))
     (format t "[~6D] best: ~S~%" 0 (elt pf 0))
@@ -523,7 +537,7 @@
                    pf (determine-population-fitness p parsed-side-by-side))
              (format t "[~6D] best: ~S~%" i (elt pf 0))
              (force-output))
-    p))
+    (cdr (elt pf 0))))
 
 
 ;;; Main
