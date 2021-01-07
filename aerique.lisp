@@ -20,6 +20,12 @@
 (ql:quickload :cl-csv :silent t)
 
 
+;;; Globals
+
+(defparameter *a2c* nil)  ; maps aminoacid to its codon(s)
+(defparameter *c2a* nil)  ; maps codon to the aminoacid it creates
+
+
 ;;; Common Functions
 
 (defun mk-pathname (pathname-or-string)
@@ -92,6 +98,11 @@
           do (setf (gethash aminoacid a2c)
                    (append (gethash aminoacid a2c) (list codon))))
     (list :c2a c2a :a2c a2c)))
+
+;; FIXME don't do this here but in Globals at the top
+(let ((equivalence-tables (make-equivalence-tables)))
+  (setf *a2c* (getf equivalence-tables :a2c)
+        *c2a* (getf equivalence-tables :c2a)))
 
 
 ;;; Functions
@@ -268,14 +279,21 @@
 ;;; GA Static Remap Attempt
 
 (defun make-random-codon-mapping ()
-  (let* ((mapping (make-hash-table :size 64 :test #'equal))
-         (tables (make-equivalence-tables))
-         (c2a (getf tables :c2a))   ; codon to aminoacid
-         (a2c (getf tables :a2c)))  ; aminoacid to codons
-    (loop for codon in (loop for codon being the hash-keys in c2a
+  (let ((mapping (make-hash-table :size 64 :test #'equal)))
+    (loop for codon in (loop for codon being the hash-keys in *c2a*
                              collect codon)
-          for aminoacid = (gethash codon c2a)
-          for codons = (gethash aminoacid a2c)
+          for aminoacid = (gethash codon *c2a*)
+          for codons = (gethash aminoacid *a2c*)
+          do (setf (gethash codon mapping) (random-elt codons)))
+    mapping))  ; hash table (faster than an alist (hopefully (pretty sure)))
+
+(defun make-random-codon-mapping-test ()
+  (let ((mapping (make-hash-table :size 64 :test #'equal)))
+    (loop for codon in (loop for codon being the hash-keys in *c2a*
+                             repeat 8
+                             collect codon)
+          for aminoacid = (gethash codon *c2a*)
+          for codons = (gethash aminoacid *a2c*)
           do (setf (gethash codon mapping) (random-elt codons)))
     mapping))  ; hash table (faster than an alist (hopefully (pretty sure)))
 
@@ -305,13 +323,10 @@
 (defun ga-static-remap (parsed-side-by-side &key (codon-mapping nil)
                                                  (generations 10000)
                                                  (verbose t))
-  (let* ((mapping (if codon-mapping
-                      (copy-codon-mapping codon-mapping)
-                      (make-random-codon-mapping)))
-         (tables (make-equivalence-tables))
-         (a2c (getf tables :a2c))
-         (c2a (getf tables :c2a))
-         (virus-codons (get-virus-codons parsed-side-by-side)))
+  (let ((mapping (if codon-mapping
+                     (copy-codon-mapping codon-mapping)
+                     (make-random-codon-mapping)))
+        (virus-codons (get-virus-codons parsed-side-by-side)))
     ;(when verbose
     ;  (format t "mapping: ")
     ;  (print-codon-mapping mapping))
@@ -343,14 +358,15 @@
                          i best-codon-match best-nucleotide-match)
                  (force-output)))
              ;; Change a random mapping.
+             ;; FIXME call `mutate` now that we have it
              (let* ((keys (loop for k being the hash-keys in mapping
                                 collect k))
                     (random-key (random-elt keys))
                     ;; We use one of the mapping codons (`random-key`) to get
                     ;; its aminoacid and use that aminoacid the get the
                     ;; equivalent codons and pick a random one of those.
-                    (new-codon (random-elt (gethash (gethash random-key c2a)
-                                                    a2c))))
+                    (new-codon (random-elt (gethash (gethash random-key *c2a*)
+                                                    *a2c*))))
                ;(when verbose
                ;  (format t "  - [~8D] replacing ~A -> ~A~%"
                ;          i (gethash random-key mapping) new-codon)
@@ -397,6 +413,117 @@
                          i best-codon-match best-nucleotide-match)
                  (force-output)))
           finally (return best-mapping))))
+
+
+(defun make-population (&key (size 100) (verbose t))
+  (declare (ignore verbose))
+  (loop for i from 0 below size
+        collect (make-random-codon-mapping) into result
+        finally (return (coerce result 'vector))))
+
+
+(defun determine-population-fitness (population parsed-side-by-side)
+  (loop with psbs = parsed-side-by-side
+        with virus-codons = (get-virus-codons parsed-side-by-side)
+        for individual across population
+        for codons = (do-remap virus-codons individual)
+        for codon-match = (compare-codons-against-vaccine codons psbs)
+        for nucleotide-match = (compare-nucleotides-against-vaccine codons psbs)
+        for fitness = (+ (* 2 codon-match) nucleotide-match)
+        collect (cons fitness individual) into result
+        finally (return (sort (coerce result 'vector) #'> :key #'car))))
+
+
+(defun tournament-selection (fitness-population &key (rounds 4))
+  "FITNESS-POPULATION is the output of DETERMINE-POPULATION-FITNESS."
+  (loop with best = (random-elt fitness-population)
+        repeat rounds
+        for contestant = (random-elt fitness-population)
+        do (when (> (car contestant) (car best))
+             (setf best contestant))
+        finally (return (cdr best))))
+
+
+(defun mapping-to-vector (mapping)
+  (loop for k being the hash-keys in mapping
+        ;collect (vector k (gethash k mapping)) into result
+        ;; alternative visualization
+        ;collect (list k '-> (gethash k mapping)) into result
+        collect (cons k (gethash k mapping)) into result
+        finally (return (coerce result 'vector))))
+
+
+(defun mate (mapping-a mapping-b)
+  (let* ((mv-a (mapping-to-vector mapping-a))
+         (mv-b (mapping-to-vector mapping-b))
+         (pivot (random (length mv-a)))  ; same length as `mv-b`
+         (mv-c (concatenate 'vector (subseq mv-a 0 pivot)
+                                    (subseq mv-b pivot)))
+         (mv-d (concatenate 'vector (subseq mv-b 0 pivot)
+                                    (subseq mv-a pivot)))
+         (mapping-c (make-hash-table :size 64 :test #'equal))
+         (mapping-d (make-hash-table :size 64 :test #'equal)))
+    (loop for cons across mv-c
+          for from = (car cons)
+          for to   = (cdr cons)
+          do (setf (gethash from mapping-c) to))
+    (loop for cons across mv-d
+          for from = (car cons)
+          for to   = (cdr cons)
+          do (setf (gethash from mapping-d) to))
+    (list mapping-c mapping-d)))
+
+
+(defun mutate (mapping)
+  ;; Change a random mapping.
+  (let* ((new-mapping (copy-codon-mapping mapping))
+         (keys (loop for k being the hash-keys in mapping collect k))
+         (random-key (random-elt keys))
+         ;; We use one of the mapping codons (`random-key`) to get
+         ;; its aminoacid and use that aminoacid the get the
+         ;; equivalent codons and pick a random one of those codons.
+         (new-codon (random-elt (gethash (gethash random-key *c2a*) *a2c*))))
+    ;(format t "Changing ~A->~A to ~A->~A.~%"
+    ;        random-key (gethash random-key mapping) random-key new-codon)
+    (setf (gethash random-key new-mapping) new-codon)
+    new-mapping))
+
+
+(defun evolve (population parse-side-by-side)
+  (loop with size = (length population)
+        with f-p = (determine-population-fitness population parse-side-by-side)
+        with new-population = ;; elitisism: fill part of new population with
+                              ;; the best member of the previous population
+                              (loop for i across (subseq f-p 0 (floor size 10))
+                                    collect (cdr i))
+        while (< (length new-population) (length population))
+        do (if (<= (random 1.0) 0.8)
+               ;; crossover
+               (loop for child in (mate (tournament-selection f-p)
+                                        (tournament-selection f-p))
+                     do (if (<= (random 1.0) 0.03)
+                            (push (mutate child) new-population)
+                            (push child new-population)))
+               ;; no crossover, no mating
+               (if (<= (random 1.0) 0.03)
+                   (push (mutate (random-elt population)) new-population)
+                   (push (random-elt population) new-population)))
+        finally (return (coerce new-population 'vector))))
+
+
+(defun do-runs (parsed-side-by-side
+                &key (max-generations 10) (population-size 16))
+  (let* ((p  (make-population :size population-size))
+         (pf (determine-population-fitness p parsed-side-by-side)))
+    (format t "[~6D] best: ~S~%" 0 (elt pf 0))
+    (force-output)
+    (loop repeat max-generations
+          for i from 1
+          do (setf p  (evolve p parsed-side-by-side)
+                   pf (determine-population-fitness p parsed-side-by-side))
+             (format t "[~6D] best: ~S~%" i (elt pf 0))
+             (force-output))
+    p))
 
 
 ;;; Main
