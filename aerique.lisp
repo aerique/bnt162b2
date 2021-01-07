@@ -113,6 +113,20 @@
         finally (return (coerce result 'string))))
 
 
+(defun get-virus-codons (parsed-side-by-side)
+  "PARSED-SIDE-BY-SIDE is the output of READ-SIDE-BY-SIDE-CSV."
+  (loop for row across parsed-side-by-side
+        collect (elt row 1) into result
+        finally (return (coerce result 'vector))))
+
+
+(defun get-vaccine-codons (parsed-side-by-side)
+  "PARSED-SIDE-BY-SIDE is the output of READ-SIDE-BY-SIDE-CSV."
+  (loop for row across parsed-side-by-side
+        collect (elt row 2) into result
+        finally (return (coerce result 'vector))))
+
+
 (defun compare-codons-against-vaccine (codons parsed-side-by-side)
   "CODONS should be a vector of codons where each codon is a three letter
   string: #(\"TAA\" \"ACA\" ...)
@@ -139,20 +153,6 @@
              (incf n_different))
         finally (return (- 100 (* (/ n_different (length vaccine-nucleotides))
                                   100.0)))))
-
-
-(defun get-virus-codons (parsed-side-by-side)
-  "PARSED-SIDE-BY-SIDE is the output of READ-SIDE-BY-SIDE-CSV."
-  (loop for row across parsed-side-by-side
-        collect (elt row 1) into result
-        finally (return (coerce result 'vector))))
-
-
-(defun get-vaccine-codons (parsed-side-by-side)
-  "PARSED-SIDE-BY-SIDE is the output of READ-SIDE-BY-SIDE-CSV."
-  (loop for row across parsed-side-by-side
-        collect (elt row 2) into result
-        finally (return (coerce result 'vector))))
 
 
 ;;; No Operation 'Algorithm
@@ -524,38 +524,45 @@
 
 ;; To profile: `(sb-sprof:with-profiling (:sample-interval 0.0001
 ;;                                        :report :flat)
-;;                (do-runs psbs :max-generations 8 :population-size 1024))`
-(defun do-runs (parsed-side-by-side
-                &key (max-generations 32) (population-size 2048))
+;;                (do-ga-run psbs :max-generations 8 :population-size 1024))`
+(defun do-ga-run (parsed-side-by-side
+                  &key (max-generations 32) (population-size 2048) (verbose t))
   (let* ((p  (make-population :size population-size))
          (pf (determine-population-fitness p parsed-side-by-side)))
-    (format t "[~6D] best: ~S~%" 0 (elt pf 0))
-    (force-output)
+    (when verbose
+      (format t "[~6D] best: ~S~%" 0 (elt pf 0))
+      (force-output))
     (loop repeat max-generations
           for i from 1
           do (setf p  (evolve p parsed-side-by-side)
                    pf (determine-population-fitness p parsed-side-by-side))
-             (format t "[~6D] best: ~S~%" i (elt pf 0))
-             (force-output))
-    (cdr (elt pf 0))))
+             (when verbose
+               (format t "[~6D] best: ~S~%" i (elt pf 0))
+               (force-output)))
+    (values (do-remap (get-virus-codons parsed-side-by-side) (cdr (elt pf 0)))
+            (cdr (elt pf 0)))))
 
 
 ;;; Main
 
 (defun main ()
   (format t "~&~%=== results ===~%~%")
+  (format t "The last row (`DO-GA-RUN`) takes a while!~%~%")
   (let ((psbs (read-side-by-side-csv))
         (algorithms '(nop
                       berts-algorithm
                       replace-with-higher-gc-codon-01
                       replace-with-higher-gc-codon-02
-                      replace-cca-with-cct)))
+                      replace-cca-with-cct
+                      do-ga-run)))
     (format t " name                             | codon match | nucleotide match~%~
                ----------------------------------+-------------+------------------~%")
+    (force-output)
     (loop for algo in algorithms
           for codons = (funcall algo psbs :verbose nil)
           for codon_perc = (compare-codons-against-vaccine codons psbs)
           for nucl_perc = (compare-nucleotides-against-vaccine codons psbs)
           do (format t " ~32A |      ~2,2F% | ~2,2F%~%"
-                     algo codon_perc nucl_perc)))
+                     algo codon_perc nucl_perc)
+             (force-output)))
   (format t "~%===~%~%You can quit the Lisp environment with `(quit)`.~%"))
